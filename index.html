@@ -1,10 +1,9 @@
-
- <!doctype html>
+<!doctype html>
 <html lang="de">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Translator DE / EN / TH (ohne API-Key)</title>
+  <title>Translator DE / EN / TH</title>
   <style>
     *{box-sizing:border-box}
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#f4f4f4}
@@ -37,18 +36,18 @@
   <div class="wrap">
     <h1>Translator: Deutsch ↔ English ↔ ไทย</h1>
     <p class="muted">
-      Läuft ohne API‑Key: nutzt MyMemory per <code>GET</code> mit <code>q</code> und <code>langpair=SRC|TGT</code>.
+      Backend: <span class="pill">MyMemory (ohne API‑Key)</span>
+      — tippen in ein Feld → die anderen zwei werden automatisch übersetzt.
     </p>
 
     <div class="card">
       <div class="row">
-        <span class="pill">Backend: MyMemory (kein Key)</span>
         <button id="btnClear" type="button">Alles leeren</button>
         <span class="status" id="status"></span>
       </div>
       <div class="error" id="err" style="display:none;"></div>
       <p class="muted" style="margin:8px 0 0 0">
-        Hinweis: Kostenlos nutzbar, aber es gibt Limits/Rate‑Limits (bei sehr viel Text ggf. warten/nochmal versuchen).
+        Technisch: <code>GET https://api.mymemory.translated.net/get?q=…&langpair=de|en</code>, Ergebnis: <code>responseData.translatedText</code>. 
       </p>
     </div>
 
@@ -70,20 +69,21 @@
 
 <script>
 (() => {
-  // MyMemory endpoint format: /get?q=...&langpair=en|it [web:494][web:501]
-  const API_BASE = "https://api.mymemory.translated.net/get";
-  const LS_KEY = "translator_de_en_th_mymemory_v1";
+  const API_BASE = "https://api.mymemory.translated.net/get"; // q + langpair=SRC|TGT [web:501][web:495]
+  const LS_KEY = "translator_de_en_th_mymemory_v2";
 
-  const deEl = document.getElementById("de");
-  const enEl = document.getElementById("en");
-  const thEl = document.getElementById("th");
+  const el = {
+    de: document.getElementById("de"),
+    en: document.getElementById("en"),
+    th: document.getElementById("th"),
+  };
   const statusEl = document.getElementById("status");
   const errEl = document.getElementById("err");
   const btnClear = document.getElementById("btnClear");
 
   let isAuto = false;
   let debounceTimer = null;
-  let requestId = 0;
+  let req = 0;
 
   function setStatus(s){ statusEl.textContent = s || ""; }
   function showError(s){
@@ -94,23 +94,22 @@
   function saveState() {
     try {
       localStorage.setItem(LS_KEY, JSON.stringify({
-        de: deEl.value, en: enEl.value, th: thEl.value, savedAt: new Date().toISOString()
+        de: el.de.value, en: el.en.value, th: el.th.value, savedAt: new Date().toISOString()
       }));
     } catch (_) {}
   }
-
   function loadState() {
     try {
       const raw = localStorage.getItem(LS_KEY);
       if (!raw) return;
       const s = JSON.parse(raw);
-      if (typeof s.de === "string") deEl.value = s.de;
-      if (typeof s.en === "string") enEl.value = s.en;
-      if (typeof s.th === "string") thEl.value = s.th;
+      if (typeof s.de === "string") el.de.value = s.de;
+      if (typeof s.en === "string") el.en.value = s.en;
+      if (typeof s.th === "string") el.th.value = s.th;
     } catch (_) {}
   }
 
-  async function translate(text, src, tgt, myReqId) {
+  async function translate(text, src, tgt, myReq) {
     const url = new URL(API_BASE);
     url.searchParams.set("q", text);
     url.searchParams.set("langpair", `${src}|${tgt}`);
@@ -118,13 +117,11 @@
     const res = await fetch(url.toString(), { cache: "no-store" });
     const data = await res.json().catch(() => ({}));
 
-    if (myReqId !== requestId) return null; // ignore stale results
+    if (myReq !== req) return null; // stale
 
-    // API example response includes responseData.translatedText [web:494]
     const out = data?.responseData?.translatedText;
     if (typeof out !== "string") {
-      const msg = data?.responseDetails || "Unbekannter Fehler";
-      throw new Error(msg);
+      throw new Error(data?.responseDetails || "Übersetzung fehlgeschlagen");
     }
     return out;
   }
@@ -132,27 +129,24 @@
   function schedule(from) {
     if (isAuto) return;
     clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => run(from), 450);
+    debounceTimer = setTimeout(() => run(from), 500);
   }
 
   async function run(from) {
-    const map = { de: deEl.value, en: enEl.value, th: thEl.value };
-    const text = (map[from] || "").trim();
-
+    const text = (el[from].value || "").trim();
     showError("");
+
     if (!text) {
       isAuto = true;
-      if (from !== "de") deEl.value = "";
-      if (from !== "en") enEl.value = "";
-      if (from !== "th") thEl.value = "";
+      for (const k of ["de","en","th"]) if (k !== from) el[k].value = "";
       isAuto = false;
       setStatus("");
       saveState();
       return;
     }
 
-    requestId++;
-    const myReqId = requestId;
+    req++;
+    const myReq = req;
 
     setStatus("Übersetze …");
 
@@ -161,39 +155,34 @@
       const [a, b] = targets;
 
       const [ta, tb] = await Promise.all([
-        translate(text, from, a, myReqId),
-        translate(text, from, b, myReqId)
+        translate(text, from, a, myReq),
+        translate(text, from, b, myReq)
       ]);
 
-      if (myReqId !== requestId) return;
+      if (myReq !== req) return;
 
       isAuto = true;
-      if (a === "de") deEl.value = ta;
-      if (a === "en") enEl.value = ta;
-      if (a === "th") thEl.value = ta;
-
-      if (b === "de") deEl.value = tb;
-      if (b === "en") enEl.value = tb;
-      if (b === "th") thEl.value = tb;
+      el[a].value = ta ?? "";
+      el[b].value = tb ?? "";
       isAuto = false;
 
       setStatus("Fertig.");
       saveState();
     } catch (e) {
-      if (myReqId !== requestId) return;
+      if (myReq !== req) return;
       setStatus("");
       showError("Fehler: " + (e?.message || e));
     }
   }
 
-  deEl.addEventListener("input", () => { schedule("de"); saveState(); });
-  enEl.addEventListener("input", () => { schedule("en"); saveState(); });
-  thEl.addEventListener("input", () => { schedule("th"); saveState(); });
+  el.de.addEventListener("input", () => { schedule("de"); saveState(); });
+  el.en.addEventListener("input", () => { schedule("en"); saveState(); });
+  el.th.addEventListener("input", () => { schedule("th"); saveState(); });
 
   btnClear.addEventListener("click", () => {
     showError(""); setStatus("");
     isAuto = true;
-    deEl.value = ""; enEl.value = ""; thEl.value = "";
+    el.de.value = ""; el.en.value = ""; el.th.value = "";
     isAuto = false;
     saveState();
   });
