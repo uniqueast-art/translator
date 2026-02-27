@@ -1,9 +1,10 @@
-<!doctype html>
+
+ <!doctype html>
 <html lang="de">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Translator DE / EN / TH (Auto-Fallback)</title>
+  <title>Translator DE / EN / TH (ohne API-Key)</title>
   <style>
     *{box-sizing:border-box}
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#f4f4f4}
@@ -36,19 +37,18 @@
   <div class="wrap">
     <h1>Translator: Deutsch ↔ English ↔ ไทย</h1>
     <p class="muted">
-      Auto: versucht Offline‑KI (Transformers.js) → wenn blockiert, Online‑Mirror (LibreTranslate ohne Key).
+      Läuft ohne API‑Key: nutzt MyMemory per <code>GET</code> mit <code>q</code> und <code>langpair=SRC|TGT</code>.
     </p>
 
     <div class="card">
       <div class="row">
-        <span class="pill" id="backendPill">Backend: Auto</span>
-        <button id="btnInit" type="button">Initialisieren</button>
+        <span class="pill">Backend: MyMemory (kein Key)</span>
         <button id="btnClear" type="button">Alles leeren</button>
         <span class="status" id="status"></span>
       </div>
       <div class="error" id="err" style="display:none;"></div>
       <p class="muted" style="margin:8px 0 0 0">
-        Offline‑KI lädt beim ersten Mal ein Modell. Online‑Fallback nutzt <code>POST /translate</code>. [page:3]
+        Hinweis: Kostenlos nutzbar, aber es gibt Limits/Rate‑Limits (bei sehr viel Text ggf. warten/nochmal versuchen).
       </p>
     </div>
 
@@ -70,158 +70,65 @@
 
 <script>
 (() => {
-  // ---------------- UI ----------------
-  const deEl = document.getElementById('de');
-  const enEl = document.getElementById('en');
-  const thEl = document.getElementById('th');
-  const statusEl = document.getElementById('status');
-  const errEl = document.getElementById('err');
-  const backendPill = document.getElementById('backendPill');
-  const btnInit = document.getElementById('btnInit');
-  const btnClear = document.getElementById('btnClear');
+  // MyMemory endpoint format: /get?q=...&langpair=en|it [web:494][web:501]
+  const API_BASE = "https://api.mymemory.translated.net/get";
+  const LS_KEY = "translator_de_en_th_mymemory_v1";
 
-  function setStatus(s){ statusEl.textContent = s || ''; }
-  function showError(s){
-    errEl.style.display = s ? 'block' : 'none';
-    errEl.textContent = s || '';
-  }
-  function setBackendLabel(s){ backendPill.textContent = 'Backend: ' + s; }
+  const deEl = document.getElementById("de");
+  const enEl = document.getElementById("en");
+  const thEl = document.getElementById("th");
+  const statusEl = document.getElementById("status");
+  const errEl = document.getElementById("err");
+  const btnClear = document.getElementById("btnClear");
 
-  // ---------------- State ----------------
   let isAuto = false;
   let debounceTimer = null;
-  let reqId = 0;
+  let requestId = 0;
 
-  // ---------------- Online mirrors ----------------
-  // Mirrors list: LibreTranslate docs (some require key; these two are listed without "API Key Required") [page:1]
-  const MIRRORS = [
-    'https://translate.flossboxin.org.in',
-    'https://lt.blitzw.in'
-  ];
-
-  async function translateOnline(text, source, target, signal) {
-    let lastErr = null;
-    for (const base of MIRRORS) {
-      try {
-        const url = base.replace(/\/+$/, '') + '/translate';
-        // LibreTranslate: POST /translate with q, source, target, format, optional api_key [page:3]
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ q: text, source, target, format: 'text' }),
-          signal
-        });
-
-        const payload = await res.json().catch(async () => ({ error: await res.text() }));
-        if (!res.ok) throw new Error(payload?.error || payload?.message || ('HTTP ' + res.status));
-
-        const out = payload?.translatedText;
-        if (typeof out !== 'string') throw new Error('Online: translatedText fehlt.');
-        return out;
-      } catch (e) {
-        lastErr = e;
-      }
-    }
-    throw new Error('Online-Mirror fehlgeschlagen: ' + (lastErr?.message || lastErr || 'unknown'));
+  function setStatus(s){ statusEl.textContent = s || ""; }
+  function showError(s){
+    errEl.style.display = s ? "block" : "none";
+    errEl.textContent = s || "";
   }
 
-  // ---------------- Offline (Transformers.js) ----------------
-  // CDN usage via script tag is documented (jsDelivr and UNPKG examples). [web:429]
-  const TF_SOURCES = [
-    './transformers.min.js', // optional: wenn du es später lokal ins Repo legst
-    'https://cdn.jsdelivr.net/npm/@xenova/transformers/dist/transformers.min.js',
-    'https://www.unpkg.com/@xenova/transformers/dist/transformers.min.js'
-  ];
-
-  const NLLB_LANG = { de:'deu_Latn', en:'eng_Latn', th:'tha_Thai' };
-  let offlineTranslator = null;
-  let offlineInitPromise = null;
-
-  function loadScript(src) {
-    return new Promise((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = src;
-      s.async = true;
-      s.onload = () => resolve(true);
-      s.onerror = () => reject(new Error('Script load failed: ' + src));
-      document.head.appendChild(s);
-    });
-  }
-
-  async function ensureTransformersLoaded() {
-    if (window.transformers?.pipeline) return true;
-
-    let last = null;
-    for (const src of TF_SOURCES) {
-      try {
-        await loadScript(src);
-        if (window.transformers?.pipeline) return true;
-      } catch (e) {
-        last = e;
-      }
-    }
-    throw last || new Error('Transformers.js nicht verfügbar');
-  }
-
-  async function initOffline() {
-    if (offlineTranslator) return offlineTranslator;
-    if (offlineInitPromise) return offlineInitPromise;
-
-    offlineInitPromise = (async () => {
-      setBackendLabel('Offline-KI lädt …');
-      setStatus('Lade Transformers.js …');
-      await ensureTransformersLoaded();
-
-      setStatus('Lade Übersetzungsmodell (einmalig) …');
-      // NLLB: ein Modell für viele Sprachen
-      offlineTranslator = await window.transformers.pipeline('translation', 'Xenova/nllb-200-distilled-600M');
-      setBackendLabel('Offline-KI');
-      setStatus('Offline-KI bereit.');
-      return offlineTranslator;
-    })();
-
-    return offlineInitPromise;
-  }
-
-  async function translateOffline(text, source, target, myReqId) {
-    const t = await initOffline();
-    if (myReqId !== reqId) return null;
-    const out = await t(text, { src_lang: NLLB_LANG[source], tgt_lang: NLLB_LANG[target] });
-    if (myReqId !== reqId) return null;
-    const translated = out?.[0]?.translation_text;
-    if (typeof translated !== 'string') throw new Error('Offline-KI: Unerwartete Antwort.');
-    return translated;
-  }
-
-  // ---------------- Auto strategy ----------------
-  async function translateAuto(text, source, target, myReqId) {
-    // 1) Offline zuerst versuchen (wenn möglich)
+  function saveState() {
     try {
-      return await translateOffline(text, source, target, myReqId);
-    } catch (_) {
-      // 2) Online Mirrors ohne Key
-      setBackendLabel('Online-Mirror');
-      const ac = new AbortController();
-      const signal = ac.signal;
-
-      // Soft-abort bei neuer Eingabe
-      const myLocal = myReqId;
-      const timer = setInterval(() => {
-        if (myLocal !== reqId) { ac.abort(); clearInterval(timer); }
-      }, 120);
-
-      try {
-        const out = await translateOnline(text, source, target, signal);
-        clearInterval(timer);
-        return out;
-      } catch (e) {
-        clearInterval(timer);
-        throw e;
-      }
-    }
+      localStorage.setItem(LS_KEY, JSON.stringify({
+        de: deEl.value, en: enEl.value, th: thEl.value, savedAt: new Date().toISOString()
+      }));
+    } catch (_) {}
   }
 
-  // ---------------- Main flow ----------------
+  function loadState() {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (!raw) return;
+      const s = JSON.parse(raw);
+      if (typeof s.de === "string") deEl.value = s.de;
+      if (typeof s.en === "string") enEl.value = s.en;
+      if (typeof s.th === "string") thEl.value = s.th;
+    } catch (_) {}
+  }
+
+  async function translate(text, src, tgt, myReqId) {
+    const url = new URL(API_BASE);
+    url.searchParams.set("q", text);
+    url.searchParams.set("langpair", `${src}|${tgt}`);
+
+    const res = await fetch(url.toString(), { cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
+
+    if (myReqId !== requestId) return null; // ignore stale results
+
+    // API example response includes responseData.translatedText [web:494]
+    const out = data?.responseData?.translatedText;
+    if (typeof out !== "string") {
+      const msg = data?.responseDetails || "Unbekannter Fehler";
+      throw new Error(msg);
+    }
+    return out;
+  }
+
   function schedule(from) {
     if (isAuto) return;
     clearTimeout(debounceTimer);
@@ -230,74 +137,68 @@
 
   async function run(from) {
     const map = { de: deEl.value, en: enEl.value, th: thEl.value };
-    const text = (map[from] || '').trim();
+    const text = (map[from] || "").trim();
 
-    showError('');
+    showError("");
     if (!text) {
       isAuto = true;
-      if (from !== 'de') deEl.value = '';
-      if (from !== 'en') enEl.value = '';
-      if (from !== 'th') thEl.value = '';
+      if (from !== "de") deEl.value = "";
+      if (from !== "en") enEl.value = "";
+      if (from !== "th") thEl.value = "";
       isAuto = false;
-      setStatus('');
+      setStatus("");
+      saveState();
       return;
     }
 
-    reqId++;
-    const myReqId = reqId;
-    setStatus('Übersetze …');
+    requestId++;
+    const myReqId = requestId;
+
+    setStatus("Übersetze …");
 
     try {
-      const targets = ['de','en','th'].filter(x => x !== from);
+      const targets = ["de","en","th"].filter(x => x !== from);
       const [a, b] = targets;
 
       const [ta, tb] = await Promise.all([
-        translateAuto(text, from, a, myReqId),
-        translateAuto(text, from, b, myReqId),
+        translate(text, from, a, myReqId),
+        translate(text, from, b, myReqId)
       ]);
 
-      if (myReqId !== reqId) return;
+      if (myReqId !== requestId) return;
 
       isAuto = true;
-      if (a === 'de') deEl.value = ta; if (a === 'en') enEl.value = ta; if (a === 'th') thEl.value = ta;
-      if (b === 'de') deEl.value = tb; if (b === 'en') enEl.value = tb; if (b === 'th') thEl.value = tb;
+      if (a === "de") deEl.value = ta;
+      if (a === "en") enEl.value = ta;
+      if (a === "th") thEl.value = ta;
+
+      if (b === "de") deEl.value = tb;
+      if (b === "en") enEl.value = tb;
+      if (b === "th") thEl.value = tb;
       isAuto = false;
 
-      setStatus('Fertig.');
+      setStatus("Fertig.");
+      saveState();
     } catch (e) {
-      setStatus('');
-      showError('Fehler: ' + (e?.message || e));
+      if (myReqId !== requestId) return;
+      setStatus("");
+      showError("Fehler: " + (e?.message || e));
     }
   }
 
-  // ---------------- Buttons ----------------
-  btnInit.addEventListener('click', async () => {
-    showError('');
-    setBackendLabel('Auto');
-    setStatus('Initialisiere …');
-    try {
-      await initOffline();
-      setStatus('OK (Offline-KI verfügbar).');
-    } catch (e) {
-      setBackendLabel('Online-Mirror');
-      setStatus('');
-      showError('Offline-KI nicht möglich (CDN/Netz blockiert?). Online-Mirror aktiv. Details: ' + (e?.message || e));
-    }
+  deEl.addEventListener("input", () => { schedule("de"); saveState(); });
+  enEl.addEventListener("input", () => { schedule("en"); saveState(); });
+  thEl.addEventListener("input", () => { schedule("th"); saveState(); });
+
+  btnClear.addEventListener("click", () => {
+    showError(""); setStatus("");
+    isAuto = true;
+    deEl.value = ""; enEl.value = ""; thEl.value = "";
+    isAuto = false;
+    saveState();
   });
 
-  btnClear.addEventListener('click', () => {
-    showError(''); setStatus('');
-    isAuto = true; deEl.value=''; enEl.value=''; thEl.value=''; isAuto = false;
-  });
-
-  // ---------------- Events ----------------
-  deEl.addEventListener('input', () => schedule('de'));
-  enEl.addEventListener('input', () => schedule('en'));
-  thEl.addEventListener('input', () => schedule('th'));
-
-  // Start: Auto warmup (nicht blockierend)
-  setBackendLabel('Auto');
-  initOffline().catch(() => { setBackendLabel('Online-Mirror'); });
+  loadState();
 })();
 </script>
 </body>
