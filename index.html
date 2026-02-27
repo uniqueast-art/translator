@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Translator DE / EN / TH</title>
+  <style>
+    *{box-sizing:border-box}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#f4f4f4}
+    .wrap{max-width:1000px;margin:0 auto;padding:16px}
+    h1{margin:6px 0 4px 0;font-size:22px}
+    .muted{color:#666;font-size:13px;margin:0 0 12px 0}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:10px 0}
+    .card{background:#fff;border-radius:14px;box-shadow:0 2px 10px rgba(0,0,0,.08);padding:14px;margin:12px 0}
+    label{display:block;font-weight:650;margin:0 0 8px 0}
+    textarea{
+      width:100%; min-height:160px; resize:vertical;
+      padding:12px; border:1px solid #d8d8d8; border-radius:10px;
+      font-size:16px; line-height:1.35;
+    }
+    textarea:focus{outline:2px solid #2563eb33;border-color:#2563eb}
+    .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+    @media (max-width:900px){.grid{grid-template-columns:1fr}}
+    .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    input[type="text"]{
+      padding:10px 10px;border:1px solid #d8d8d8;border-radius:10px;min-width:260px
+    }
+    button{
+      border:1px solid #d8d8d8;background:#fff;border-radius:10px;padding:10px 12px;cursor:pointer
+    }
+    button:hover{background:#f3f3f3}
+    .status{font-size:13px;color:#444}
+    .error{font-size:13px;color:#b00020}
+    .pill{display:inline-block;padding:3px 8px;border-radius:999px;background:#eef2ff;font-size:12px;color:#1f2a44}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Translator: Deutsch ↔ English ↔ ไทย</h1>
+    <p class="muted">
+      Auto-Übersetzung: Tippe in ein Feld, die anderen werden automatisch befüllt.
+      (Quelle: LibreTranslate API <span class="pill">/translate</span>)
+    </p>
+
+    <div class="card">
+      <div class="controls">
+        <label style="margin:0">
+          API Base URL:
+          <input id="apiBase" type="text" value="https://libretranslate.com" />
+        </label>
+        <label style="margin:0">
+          API Key (optional):
+          <input id="apiKey" type="text" placeholder="leer lassen, wenn nicht nötig" />
+        </label>
+        <button id="btnTest" type="button">Test</button>
+        <button id="btnClear" type="button">Alles leeren</button>
+        <span class="status" id="status"></span>
+      </div>
+      <div class="error" id="err" style="display:none;"></div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <label for="de">Deutsch (de)</label>
+        <textarea id="de" placeholder="Text auf Deutsch …"></textarea>
+      </div>
+
+      <div class="card">
+        <label for="en">English (en)</label>
+        <textarea id="en" placeholder="Text in English …"></textarea>
+      </div>
+
+      <div class="card">
+        <label for="th">ไทย (th)</label>
+        <textarea id="th" placeholder="ข้อความภาษาไทย …"></textarea>
+      </div>
+    </div>
+
+    <p class="muted" style="margin-top:10px">
+      Hinweis: Übersetzungen laufen über <code>POST /translate</code> mit <code>q</code>, <code>source</code>, <code>target</code>, <code>format</code> (und optional <code>api_key</code>). [web:398][web:388]
+    </p>
+  </div>
+
+<script>
+(() => {
+  // --- UI ---
+  const elDe = document.getElementById("de");
+  const elEn = document.getElementById("en");
+  const elTh = document.getElementById("th");
+  const apiBaseEl = document.getElementById("apiBase");
+  const apiKeyEl = document.getElementById("apiKey");
+  const statusEl = document.getElementById("status");
+  const errEl = document.getElementById("err");
+  const btnClear = document.getElementById("btnClear");
+  const btnTest = document.getElementById("btnTest");
+
+  // --- State ---
+  let debounceTimer = null;
+  let currentAbort = null;
+  let isAutoUpdating = false;
+
+  const LS_KEY = "triple_translator_state_v1";
+
+  function setStatus(msg) { statusEl.textContent = msg || ""; }
+  function showError(msg) {
+    errEl.style.display = msg ? "block" : "none";
+    errEl.textContent = msg || "";
+  }
+
+  function apiUrl(path) {
+    const base = (apiBaseEl.value || "").trim().replace(/\/+$/, "");
+    return base + path;
+  }
+
+  async function translate({ text, source, target, signal }) {
+    const api_key = (apiKeyEl.value || "").trim();
+    const body = { q: text, source, target, format: "text" };
+    if (api_key) body.api_key = api_key;
+
+    const res = await fetch(apiUrl("/translate"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal
+    });
+
+    // LibreTranslate liefert JSON; bei Fehlern kommt oft JSON oder Text
+    const ct = res.headers.get("content-type") || "";
+    let payload = null;
+    if (ct.includes("application/json")) payload = await res.json();
+    else payload = { message: await res.text() };
+
+    if (!res.ok) {
+      const msg = payload?.error || payload?.message || ("HTTP " + res.status);
+      throw new Error(msg);
+    }
+
+    const out = payload?.translatedText;
+    if (typeof out !== "string") throw new Error("Unerwartete Antwort (translatedText fehlt).");
+    return out;
+  }
+
+  function scheduleTranslate(fromLang) {
+    if (isAutoUpdating) return;
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => runTranslate(fromLang), 450);
+  }
+
+  async function runTranslate(fromLang) {
+    const map = { de: elDe.value, en: elEn.value, th: elTh.value };
+    const text = (map[fromLang] || "").trim();
+
+    showError("");
+    if (!text) {
+      isAutoUpdating = true;
+      if (fromLang !== "de") elDe.value = "";
+      if (fromLang !== "en") elEn.value = "";
+      if (fromLang !== "th") elTh.value = "";
+      isAutoUpdating = false;
+      setStatus("");
+      saveState();
+      return;
+    }
+
+    // Abort previous
+    if (currentAbort) currentAbort.abort();
+    currentAbort = new AbortController();
+    const { signal } = currentAbort;
+
+    setStatus("Übersetze …");
+
+    try {
+      // Zwei Übersetzungen parallel
+      const targets = ["de", "en", "th"].filter(l => l !== fromLang);
+      const [t1, t2] = targets;
+
+      const p1 = translate({ text, source: fromLang, target: t1, signal });
+      const p2 = translate({ text, source: fromLang, target: t2, signal });
+
+      const [out1, out2] = await Promise.all([p1, p2]);
+
+      isAutoUpdating = true;
+      if (t1 === "de") elDe.value = out1;
+      if (t1 === "en") elEn.value = out1;
+      if (t1 === "th") elTh.value = out1;
+
+      if (t2 === "de") elDe.value = out2;
+      if (t2 === "en") elEn.value = out2;
+      if (t2 === "th") elTh.value = out2;
+      isAutoUpdating = false;
+
+      setStatus("Fertig");
+      saveState(fromLang);
+
+    } catch (e) {
+      if (e?.name === "AbortError") return;
+      setStatus("");
+      showError("Fehler: " + (e?.message || e));
+    }
+  }
+
+  function saveState(lastLang) {
+    try {
+      const state = {
+        apiBase: apiBaseEl.value,
+        apiKey: apiKeyEl.value, // wenn du das nicht speichern willst: diese Zeile entfernen
+        de: elDe.value,
+        en: elEn.value,
+        th: elTh.value,
+        lastLang: lastLang || null,
+        savedAt: new Date().toISOString()
+      };
+      localStorage.setItem(LS_KEY, JSON.stringify(state));
+    } catch (_) {}
+  }
+
+  function loadState() {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (!raw) return;
+      const s = JSON.parse(raw);
+      if (s.apiBase) apiBaseEl.value = s.apiBase;
+      if (s.apiKey) apiKeyEl.value = s.apiKey;
+      if (typeof s.de === "string") elDe.value = s.de;
+      if (typeof s.en === "string") elEn.value = s.en;
+      if (typeof s.th === "string") elTh.value = s.th;
+      setStatus("");
+    } catch (_) {}
+  }
+
+  // Events
+  elDe.addEventListener("input", () => { scheduleTranslate("de"); saveState("de"); });
+  elEn.addEventListener("input", () => { scheduleTranslate("en"); saveState("en"); });
+  elTh.addEventListener("input", () => { scheduleTranslate("th"); saveState("th"); });
+
+  btnClear.addEventListener("click", () => {
+    showError("");
+    setStatus("");
+    isAutoUpdating = true;
+    elDe.value = ""; elEn.value = ""; elTh.value = "";
+    isAutoUpdating = false;
+    saveState();
+  });
+
+  btnTest.addEventListener("click", async () => {
+    showError("");
+    setStatus("Teste API …");
+    try {
+      // kleiner Self-test: "Hallo" de->en
+      const ac = new AbortController();
+      const out = await translate({ text: "Hallo", source: "de", target: "en", signal: ac.signal });
+      setStatus("OK (de→en: " + out + ")");
+    } catch (e) {
+      setStatus("");
+      showError("API Test fehlgeschlagen: " + (e?.message || e));
+    }
+  });
+
+  loadState();
+})();
+</script>
+</body>
+</html>
